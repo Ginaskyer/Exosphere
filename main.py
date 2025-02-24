@@ -54,7 +54,8 @@ def validate_json_config(jin: Dict) -> bool:
     return True
 
 
-if __name__ == '__main__':
+# if __name__ == '__main__':
+def run():
 
     parser = argparse.ArgumentParser(description='ExoSphere: detect DDoS at L2.')
     parser.add_argument('-c', '--config', type=str, default='./config.json', help='Configuration file.')
