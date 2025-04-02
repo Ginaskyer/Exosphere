@@ -6,14 +6,14 @@ class conv_block(nn.Module):
 
     def __init__(self, in_ch, out_ch):
         super(conv_block, self).__init__()
-        
+
         self.conv = nn.Sequential(
             nn.Conv1d(in_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=True),
             nn.BatchNorm1d(out_ch),
             nn.ReLU(inplace=True),
             nn.Conv1d(out_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=True),
             nn.BatchNorm1d(out_ch),
-            nn.ReLU(inplace=True)
+            nn.ReLU(inplace=True),
         )
 
     def forward(self, x):
@@ -29,7 +29,7 @@ class up_conv(nn.Module):
             nn.Upsample(scale_factor=2),
             nn.Conv1d(in_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=True),
             nn.BatchNorm1d(out_ch),
-            nn.ReLU(inplace=True)
+            nn.ReLU(inplace=True),
         )
 
     def forward(self, x):
@@ -44,7 +44,7 @@ class Exosphere(nn.Module):
 
         n1 = 64
         filters = [n1, n1 * 2, n1 * 4]
-        
+
         self.Maxpool1 = nn.MaxPool1d(kernel_size=2, stride=2)
         self.Maxpool2 = nn.MaxPool1d(kernel_size=2, stride=2)
 
@@ -59,7 +59,6 @@ class Exosphere(nn.Module):
         self.Up_conv2 = conv_block(filters[1], filters[0])
 
         self.Conv = nn.Conv1d(filters[0], out_ch, kernel_size=1, stride=1, padding=0)
-
 
     def forward(self, x):
 
