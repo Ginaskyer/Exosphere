@@ -8,7 +8,7 @@
   "gpu_enable": [0],
   "data_construct_param": {
     "train_ratio": 0.8,
-    "segment_len": 1000
+    "segment_len": 1024
   },
   "train_param": {
     "lr": 0.001,
