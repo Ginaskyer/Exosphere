@@ -27,21 +27,13 @@ wget https://www.exosphere.fuchuanpu.xyz/dataset.zip
 unzip dataset.zip && rm $_
 ```
 
-Run the following command to apply `Exosphere` for detecting amplification attack traffic:
+For training model
 ```bash
-./main.py -c ./config/config_amplification.json
-```
-The results can be found in `./log/amplification/`. We plot RoC curves in `./figures/amplification/`.
-
-Similarly, we provide examples for detecting other types of DDoS attacks.
-```bash
-./main.py -c ./config/config_application.json
-./main.py -c ./config/config_bruteforce.json
-./main.py -c ./config/config_flooding.json
+python main.py --train
 ```
 
-Finally, the results can be cleaned by `./clean.sh`.
-
-## 0x03 Maintainer
-[Chuanpu Fu](fcp20@tsinghua.edu.cn)
+For evaluating model
+```bash
+python main.py --test
+```
 
