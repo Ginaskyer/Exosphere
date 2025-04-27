@@ -1,133 +1,147 @@
-import os
-import random
-import math
-from typing import List, Tuple
-
+from sklearn.model_selection import train_test_split as sklearn_split
+from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import Dataset
 import torch
+import numpy as np
 
-from common import *
+# Function to convert segments to features and labels
+# def prepare_data(segments):
+#     features = []
+#     labels = []
 
-T_MAX = 100
-ETH_MTU = 1500
+#     for segment in segments:
+#         X = segment.drop("Label", axis=1).values
+
+#         # Extract labels
+#         y = segment["Label"].values
+
+#         features.append(X)
+#         labels.append(y)
+
+#     # Convert to PyTorch tensors
+#     features_tensor = torch.FloatTensor(np.array(features))
+#     labels_tensor = torch.LongTensor(np.array(labels))
+
+#     return features_tensor, labels_tensor
+
+def cal_entropy(df):
+    intervals = df['IAT_norm']
+    unique_intervals, counts = np.unique(intervals, return_counts=True)
+    probs = counts / counts.sum()
+    entropy = -np.sum(probs * np.log(probs + 1e-12))  # 加 epsilon 防止 log(0)
+
+    return entropy
+
+# def load_dataset(train_segments, test_segments, batch_size=32):
+#     """
+#     Converts the training and testing segments into PyTorch DataLoader objects.
+
+#     Parameters:
+#     train_segments (list): List of dataframes containing training segments
+#     test_segments (list): List of dataframes containing testing segments
+#     batch_size (int): Batch size for DataLoader
+
+#     Returns:
+#     tuple: (train_loader, test_loader) PyTorch DataLoader objects
+#     """
+#     # Prepare training data
+#     X_train, y_train = prepare_data(train_segments)
+#     train_dataset = TensorDataset(X_train, y_train)
+#     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
+#     # Prepare testing data
+#     X_test, y_test = prepare_data(test_segments)
+#     test_dataset = TensorDataset(X_test, y_test)
+#     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+#     return train_loader, test_loader
+
+def create_dataset(df, train_test_split, type_value, segment_length=2048, increments=64):
+    """
+    From dataframe, segment the data, doing increments.
+    E.g. if segment_length = 2048, increments = 64, then take 2048/64 = 32 steps.
+    From that new segments, take only segments if they have at least 1 packet that has label 1
+    Meaning, we exclude segments with only normal segments (all labelled 0).
+    Finally, we shuffle them, and split them according to train_test_split ratio
+    """
+    # Calculate step size (increment)
+    step_size = segment_length // increments
+
+    # Create segments
+    segments = []
+    for i in range(0, len(df) - segment_length + 1, step_size):
+        segment = df.iloc[i : i + segment_length]
+
+        # Check if the segment has at least one packet with label 1
+        if 1 in segment["Label"].values:  # Assuming the label column is named 'label'
+            # entropy = cal_entropy(segment)
+            segment = segment.copy()
+            # segment.loc[:, "segment_entropy"] = entropy
+            segment.loc[:, "Type"] = type_value
+            segments.append(segment)
+
+    # If no segments with label 1 were found
+    if len(segments) == 0:
+        return None, None
+
+    # Shuffle segments
+    np.random.shuffle(segments)
+
+    # Split into training and testing sets
+    split_idx = int(len(segments) * train_test_split)
+    train_segments = segments[:split_idx]
+    test_segments = segments[split_idx:]
+
+    return train_segments, test_segments
+
+class Ddosattack(Dataset):
+    def __init__(self, dataframe_list, type_number = 5):
+        """
+        dataframe_list: List[pd.DataFrame], each with columns:
+        ["IAT_norm", "PL_norm", "Label", "Type"]
+        """
+        self.data_list = []
+        self.label_list = []
+
+        for segment in dataframe_list:
+            for df in segment:
+                # 1. 提取输入特征为 (seq_len, 2)
+                data = df[["IAT_norm", "PL_norm"]].to_numpy(dtype="float32")
+                data_tensor = torch.tensor(data, dtype=torch.float)  # (seq_len, 2)
+
+                # 2. 构造标签为 (seq_len, 1)，每一行为一个 class index
+                # 若 label == 0，label_id = 0，否则根据 Type 映射为 1~4
+                labels = []
+                for i in range(len(df)):
+                    label = df.iloc[i]["Label"]
+                    type_value = df.iloc[i]["Type"]
+                    one_hot = torch.zeros(type_number, dtype=torch.float)
+                    if label == 0:
+                        one_hot[0] = 1.0
+                        labels.append(one_hot)
+                    elif 1 <= type_value <= 4:
+                        one_hot[int(type_value)] = 1.0
+                        labels.append(one_hot)  # 1~4
+                    else:
+                        raise ValueError(f"Unexpected Type: {type_value} at row {i}")
+                
+                
+                label_tensor = torch.stack(labels, dim=0)
+                # print("label_tensor", label_tensor.size())
+                
+                # print("original", df["Label"])
+                # print("data_tensor", data_tensor)
+                # print("label_tensor", label_tensor)
+                self.data_list.append(data_tensor)
+                self.label_list.append(label_tensor)
+            
+
+    def __len__(self):
+        return len(self.data_list)
+
+    def __getitem__(self, idx):
+        return self.data_list[idx], self.label_list[idx]
 
 
-@time_log
-def load_data(
-    data_tag: str,
-    data_target: str,
-    shuffle_seed=None,
-    fig_path=None,
-    train_ratio=0.80,
-    segment_len=1000,
-    time_base=1e-6,
-) -> Tuple[
-    torch.FloatTensor,
-    torch.FloatTensor,
-    torch.FloatTensor,
-    torch.FloatTensor,
-    List[List[int]],
-    List[List[int]],
-    List[List[int]],
-    List[List[int]],
-]:
 
-    if not os.path.exists(data_target):
-        exit(-1)
 
-    # Read timestamp, packet length, and label for each line
-    logging.info(f"Read dataset from {data_target}")
-    tim_vec, len_vec, label_vec = [], [], []
-    with open(data_target, "r") as f:
-        for ll in f.readlines():
-            [a, b, c] = list(map(float, ll.split()))
-            tim_vec.append(math.floor(a * (1 / time_base)))
-            len_vec.append(min(b, ETH_MTU) / ETH_MTU)
-            label_vec.append(int(c))
-
-    # Calculate inter-arrival time
-    iat_vec = [0]
-    start = tim_vec[0]
-    for i in range(1, len(tim_vec)):
-        iat_vec.append(min(max(tim_vec[i] - start, 0), T_MAX))
-        start = max(start, tim_vec[i])
-
-    feature_vec = []
-    real_label_vec = []
-    num_packet_vec = []
-    num_attack_vec = []
-    index = 0
-    while index < len(iat_vec):
-        time_var = iat_vec[index]
-        feature_vec.append(-time_var / T_MAX)
-        real_label_vec.append(0)
-        num_packet_vec.append(0)
-        num_attack_vec.append(0)
-
-        feature_vec.append(len_vec[index])
-        num_packet_vec.append(1)
-        real_label_vec.append(label_vec[index])
-        num_attack_vec.append(int(label_vec[index]))
-
-        # NOTE: Notice feature_vec contains [iat, len]
-        # real_label_vec contains [0, real_label]
-        # num_packet_vec contains [0, 1]
-        # num_attack_vec contains [0, int(real_label)]
-
-        index += 1
-
-    seg_feature_vec, seg_label_vec = [], []
-    seg_num_vec, seg_attack_num_vec = [], []
-    for i in range(0, len(feature_vec), segment_len):
-        if i + segment_len >= len(feature_vec):
-            continue
-        seg_feature_vec.append(feature_vec[i : i + segment_len])
-        seg_label_vec.append(real_label_vec[i : i + segment_len])
-        seg_num_vec.append(num_packet_vec[i : i + segment_len])
-        seg_attack_num_vec.append(num_attack_vec[i : i + segment_len])
-
-    if shuffle_seed is not None:
-        random.seed(shuffle_seed)
-        _shu_ls = list(
-            zip(seg_feature_vec, seg_label_vec, seg_num_vec, seg_attack_num_vec)
-        )
-        random.shuffle(_shu_ls)
-        seg_feature_vec, seg_label_vec, seg_num_vec, seg_attack_num_vec = (
-            [x[0] for x in _shu_ls],
-            [x[1] for x in _shu_ls],
-            [x[2] for x in _shu_ls],
-            [x[3] for x in _shu_ls],
-        )
-
-    train_test_line = int(train_ratio * len(seg_feature_vec))
-    train_data = seg_feature_vec[:train_test_line]
-    train_label = seg_label_vec[:train_test_line]
-    test_data = seg_feature_vec[train_test_line:]
-    test_label = seg_label_vec[train_test_line:]
-
-    train_num = seg_num_vec[:train_test_line]
-    test_num = seg_num_vec[train_test_line:]
-    train_atc_num = seg_attack_num_vec[:train_test_line]
-    test_atc_num = seg_attack_num_vec[train_test_line:]
-
-    train_data = torch.FloatTensor(train_data).unsqueeze(1)
-    train_label = torch.FloatTensor(train_label).unsqueeze(1)
-    test_data = torch.FloatTensor(test_data).unsqueeze(1)
-    test_label = torch.FloatTensor(test_label).unsqueeze(1)
-
-    logging.info(
-        f"[{data_tag}] Attack Frames: {label_vec.count(True)}, Benign Frames: {len(label_vec) - label_vec.count(True)}."
-    )
-    logging.info(
-        f"[{data_tag}] Train Records: {train_label.size(0)}, Test Records: {test_label.size(0)}"
-    )
-
-    return (
-        train_data,
-        train_label,
-        test_data,
-        test_label,
-        train_num,
-        test_num,
-        train_atc_num,
-        test_atc_num,
-    )

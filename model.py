@@ -1,83 +1,117 @@
-import torch
 import torch.nn as nn
+import torch
 
+class ConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        """
+        Double convolution block for U-Net.
 
-class conv_block(nn.Module):
-
-    def __init__(self, in_ch, out_ch):
-        super(conv_block, self).__init__()
-
+        Parameters:
+        in_channels (int): Number of input channels
+        out_channels (int): Number of output channels
+        """
+        super(ConvBlock, self).__init__()
         self.conv = nn.Sequential(
-            nn.Conv1d(in_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=True),
-            nn.BatchNorm1d(out_ch),
+            nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm1d(out_channels),
             nn.ReLU(inplace=True),
-            nn.Conv1d(out_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=True),
-            nn.BatchNorm1d(out_ch),
-            nn.ReLU(inplace=True),
-        )
-
-    def forward(self, x):
-        x = self.conv(x)
-        return x
-
-
-class up_conv(nn.Module):
-
-    def __init__(self, in_ch, out_ch):
-        super(up_conv, self).__init__()
-        self.up = nn.Sequential(
-            nn.Upsample(scale_factor=2),
-            nn.Conv1d(in_ch, out_ch, kernel_size=3, stride=1, padding=1, bias=True),
-            nn.BatchNorm1d(out_ch),
+            nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.BatchNorm1d(out_channels),
             nn.ReLU(inplace=True),
         )
 
     def forward(self, x):
-        x = self.up(x)
-        return x
+        return self.conv(x)
 
 
-class Exosphere(nn.Module):
+class TimeSeriesUNet(nn.Module):
+    def __init__(self, input_features, base_filters=64, depth=3):
+        """
+        U-Net architecture for time-series semantic segmentation.
 
-    def __init__(self, in_ch=3, out_ch=1):
-        super(Exosphere, self).__init__()
+        Parameters:
+        input_features (int): Number of features per time step
+        base_filters (int): Number of base filters (will be doubled in each layer)
+        depth (int): Depth of the U-Net (number of down/up-sampling operations)
+        """
+        super(TimeSeriesUNet, self).__init__()
 
-        n1 = 64
-        filters = [n1, n1 * 2, n1 * 4]
+        # Save parameters
+        self.depth = depth
 
-        self.Maxpool1 = nn.MaxPool1d(kernel_size=2, stride=2)
-        self.Maxpool2 = nn.MaxPool1d(kernel_size=2, stride=2)
+        # Create encoder blocks
+        self.encoder_blocks = nn.ModuleList()
+        self.pool_blocks = nn.ModuleList()
 
-        self.Conv1 = conv_block(in_ch, filters[0])
-        self.Conv2 = conv_block(filters[0], filters[1])
-        self.Conv3 = conv_block(filters[1], filters[2])
+        # First encoder block (input to base_filters)
+        self.encoder_blocks.append(ConvBlock(input_features, base_filters))
 
-        self.Up3 = up_conv(filters[2], filters[1])
-        self.Up_conv3 = conv_block(filters[2], filters[1])
+        # Remaining encoder blocks
+        for i in range(1, depth):
+            in_channels = base_filters * (2 ** (i - 1))
+            out_channels = base_filters * (2**i)
+            self.encoder_blocks.append(ConvBlock(in_channels, out_channels))
+            self.pool_blocks.append(nn.MaxPool1d(kernel_size=2, stride=2))
 
-        self.Up2 = up_conv(filters[1], filters[0])
-        self.Up_conv2 = conv_block(filters[1], filters[0])
+        # Bridge
+        bridge_channels = base_filters * (2 ** (depth - 1))
+        self.bridge = ConvBlock(bridge_channels, bridge_channels * 2)
 
-        self.Conv = nn.Conv1d(filters[0], out_ch, kernel_size=1, stride=1, padding=0)
+        # Create decoder blocks
+        self.upconv_blocks = nn.ModuleList()
+        self.decoder_blocks = nn.ModuleList()
+
+        # Decoder blocks
+        for i in range(depth - 1, -1, -1):
+            in_channels = base_filters * (2 ** (i + 1))
+            out_channels = base_filters * (2**i)
+
+            self.upconv_blocks.append(
+                nn.ConvTranspose1d(in_channels, out_channels, kernel_size=2, stride=2)
+            )
+            self.decoder_blocks.append(ConvBlock(in_channels, out_channels))
+
+        # Output layer
+        self.output = nn.Conv1d(base_filters, 5, kernel_size=1)
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
+        """
+        Forward pass through the U-Net.
 
-        e1 = self.Conv1(x)
+        Parameters:
+        x (torch.Tensor): Input tensor of shape [batch_size, input_features, sequence_length]
 
-        e2 = self.Maxpool1(e1)
-        e2 = self.Conv2(e2)
+        Returns:
+        torch.Tensor: Binary classification output for each time step
+        """
+        # Store encoder outputs for skip connections
+        encoder_outputs = []
 
-        e3 = self.Maxpool2(e2)
-        e3 = self.Conv3(e3)
+        # Encoder path
+        for i in range(self.depth):
+            if i == 0:
+                enc_features = self.encoder_blocks[i](x)
+            else:
+                pooled = self.pool_blocks[i - 1](enc_features)
+                enc_features = self.encoder_blocks[i](pooled)
 
-        d3 = self.Up3(e3)
-        d3 = torch.cat((e2, d3), dim=1)
-        d3 = self.Up_conv3(d3)
+            encoder_outputs.append(enc_features)
 
-        d2 = self.Up2(d3)
-        d2 = torch.cat((e1, d2), dim=1)
-        d2 = self.Up_conv2(d2)
+        # Bridge
+        bridge_output = self.bridge(self.pool_blocks[-1](encoder_outputs[-1]))
 
-        out = self.Conv(d2)
+        # Decoder path with skip connections
+        decoder_output = bridge_output
 
-        return out
+        for i in range(self.depth):
+            upconv = self.upconv_blocks[i](decoder_output)
+            # Use encoder output from the opposite side of the U
+            enc_features = encoder_outputs[self.depth - i - 1]
+            concat = torch.cat([upconv, enc_features], dim=1)
+            decoder_output = self.decoder_blocks[i](concat)
+
+        # Output
+        output = self.output(decoder_output)
+        output = output.permute(0, 2, 1)
+        return torch.softmax(output, dim=-1)
